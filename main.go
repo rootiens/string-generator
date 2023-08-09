@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"strconv"
 	"sync"
 )
 
-const batchSize = 700000
+const (
+	batchSize  = 700000
+	numWorkers = 8
+	bufferSize = 10000
+)
 
 func main() {
 	var allowedChars string
@@ -28,51 +31,69 @@ func main() {
 
 func saveStringsToSeparateFiles(fileName string, allowedChars string) error {
 	fileCount := 0
-	fileNamePrefix := fileName[:len(fileName)-4] // Remove the ".txt" extension
+	fileNamePrefix := fileName[:len(fileName)-4]
 
 	var wg sync.WaitGroup
-	wg.Add(1)
+	wg.Add(numWorkers)
 
-	go func() {
-		defer wg.Done()
+	outputChannels := make([]chan string, numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		outputChannels[i] = make(chan string, bufferSize)
+	}
 
-		file, err := os.Create(fileNamePrefix + "_" + strconv.Itoa(fileCount) + ".txt")
-		if err != nil {
-			fmt.Printf("Error creating file: %v\n", err)
-			return
-		}
+	// Start workers
+	for i := 0; i < numWorkers; i++ {
+		go func(workerID int) {
+			defer wg.Done()
 
-		writer := bufio.NewWriter(file)
-		lineCount := 0
+			file, err := os.Create(fmt.Sprintf("%s_%d.txt", fileNamePrefix, workerID))
+			if err != nil {
+				fmt.Printf("Error creating file: %v\n", err)
+				return
+			}
+			defer file.Close()
 
-		generate("", allowedChars, func(str string) {
-			if lineCount == batchSize {
-				writer.Flush()
-				fileCount++
-				file.Close()
+			writer := bufio.NewWriter(file)
+			lineCount := 0
 
-				file, err = os.Create(fileNamePrefix + "_" + strconv.Itoa(fileCount) + ".txt")
+			for str := range outputChannels[workerID] {
+				if lineCount == batchSize {
+					writer.Flush()
+					fileCount++
+					file.Close()
+
+					file, err = os.Create(fmt.Sprintf("%s_%d.txt", fileNamePrefix, fileCount))
+					if err != nil {
+						fmt.Printf("Error creating file: %v\n", err)
+						return
+					}
+					defer file.Close()
+
+					writer = bufio.NewWriter(file)
+					lineCount = 0
+				}
+
+				_, err := writer.WriteString(str + "\n")
 				if err != nil {
-					fmt.Printf("Error creating file: %v\n", err)
+					fmt.Printf("Error writing to file: %v\n", err)
 					return
 				}
 
-				writer = bufio.NewWriter(file)
-				lineCount = 0
+				lineCount++
 			}
 
-			_, err := writer.WriteString(str + "\n")
-			if err != nil {
-				fmt.Printf("Error writing to file: %v\n", err)
-				return
-			}
+			writer.Flush()
+		}(i)
+	}
 
-			lineCount++
-		})
+	generate("", allowedChars, func(str string) {
+		workerID := hashString(str) % numWorkers
+		outputChannels[workerID] <- str
+	})
 
-		writer.Flush()
-		file.Close()
-	}()
+	for i := 0; i < numWorkers; i++ {
+		close(outputChannels[i])
+	}
 
 	wg.Wait()
 	return nil
@@ -89,4 +110,12 @@ func generate(prefix, allowedChars string, processFunc func(string)) {
 		newPrefix := prefix + string(char)
 		generate(newPrefix, newAllowedChars, processFunc)
 	}
+}
+
+func hashString(str string) int {
+	hash := 0
+	for _, char := range str {
+		hash = (hash*31 + int(char)) % numWorkers
+	}
+	return hash
 }
