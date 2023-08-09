@@ -9,8 +9,7 @@ import (
 
 const (
 	batchSize  = 700000
-	numWorkers = 8
-	bufferSize = 10000
+	numWorkers = 10
 )
 
 func main() {
@@ -38,22 +37,41 @@ func saveStringsToSeparateFiles(fileName string, allowedChars string) error {
 
 	outputChannels := make([]chan string, numWorkers)
 	for i := 0; i < numWorkers; i++ {
-		outputChannels[i] = make(chan string, bufferSize)
+		outputChannels[i] = make(chan string)
 	}
 
-	// Start workers
+	writerPool := sync.Pool{
+		New: func() interface{} {
+			file, err := os.Create(fmt.Sprintf("%s_%d.txt", fileNamePrefix, fileCount))
+			if err != nil {
+				fmt.Printf("Error creating file: %v\n", err)
+				return nil
+			}
+			return bufio.NewWriter(file)
+		},
+	}
+
+	filePool := sync.Pool{
+		New: func() interface{} {
+			file, err := os.Create(fmt.Sprintf("%s_%d.txt", fileNamePrefix, fileCount))
+			if err != nil {
+				fmt.Printf("Error creating file: %v\n", err)
+				return nil
+			}
+			return file
+		},
+	}
+
 	for i := 0; i < numWorkers; i++ {
 		go func(workerID int) {
 			defer wg.Done()
 
-			file, err := os.Create(fmt.Sprintf("%s_%d.txt", fileNamePrefix, workerID))
-			if err != nil {
-				fmt.Printf("Error creating file: %v\n", err)
-				return
-			}
-			defer file.Close()
+			writer := writerPool.Get().(*bufio.Writer)
+			defer writerPool.Put(writer)
 
-			writer := bufio.NewWriter(file)
+			file := filePool.Get().(*os.File)
+			defer filePool.Put(file)
+
 			lineCount := 0
 
 			for str := range outputChannels[workerID] {
@@ -62,14 +80,12 @@ func saveStringsToSeparateFiles(fileName string, allowedChars string) error {
 					fileCount++
 					file.Close()
 
-					file, err = os.Create(fmt.Sprintf("%s_%d.txt", fileNamePrefix, fileCount))
-					if err != nil {
-						fmt.Printf("Error creating file: %v\n", err)
-						return
-					}
-					defer file.Close()
+					file = filePool.Get().(*os.File)
+					defer filePool.Put(file)
 
-					writer = bufio.NewWriter(file)
+					writer = writerPool.Get().(*bufio.Writer)
+					defer writerPool.Put(writer)
+
 					lineCount = 0
 				}
 
